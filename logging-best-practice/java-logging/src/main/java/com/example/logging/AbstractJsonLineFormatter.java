@@ -35,11 +35,13 @@ import org.springframework.util.StringUtils;
  * <ul>
  *   <li>It refuses to write a member name twice and throws. Logback swallows that exception, so the
  *       line would never reach stdout. {@link #format} and {@link #formatAsBytes} catch it and
- *       write the core members plus {@value #FORMAT_ERROR} instead.
+ *       write a reduced line instead: the core members, the trace members and {@value
+ *       #FORMAT_ERROR}.
  *   <li>It prints numbers with {@code toString()}, so {@code NaN} and {@code Infinity} would make
  *       the line invalid JSON. They are written as strings.
  *   <li>It does not bound the message. {@value #MESSAGE_MAX_LENGTH_PROPERTY} does; the stack trace
- *       keeps its own limits in {@code logging.structured.json.stacktrace.*}.
+ *       keeps its own limits in {@code logging.structured.json.stacktrace.*}. Both count
+ *       characters. Nothing here bounds the line in bytes or the size of a key-value pair.
  * </ul>
  */
 abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatter<ILoggingEvent> {
@@ -49,7 +51,7 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
 
     static final int DEFAULT_MESSAGE_MAX_LENGTH = 65_536;
 
-    /** Present only on a fallback line: why the full document could not be written. */
+    /** Present only on a reduced line: why the full document could not be written. */
     static final String FORMAT_ERROR = "log_format_error";
 
     /** SLF4J marker names, as in Spring Boot's {@code logstash} format. */
@@ -61,18 +63,22 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
      */
     static final String COMMONS_LOGGING_MARKER = "COMMONS-LOGGING";
 
-    private final JsonWriter<FormatFailure> fallbackWriter;
+    private final JsonWriter<ReducedLine> reducedWriter;
 
     /**
-     * Builds the writer for the full document and the one for the fallback line.
+     * Builds the writer for the full document and the one for the reduced line.
      *
-     * @param coreMembers timestamp, level, message, logger and thread; also the fallback line
+     * @param coreMembers timestamp, level, message, logger and thread; also on the reduced line
+     * @param traceMembers the members that tie a line to its trace; also on the reduced line, so
+     *     that it is still found from its request. {@code schemaMembers} writes them for the full
+     *     document, at the place the schema wants
      * @param schemaMembers everything else the concrete schema writes
      * @param customizer Spring Boot's {@code include/exclude/rename/add} customizer, or {@code
      *     null}
      */
     AbstractJsonLineFormatter(
             Consumer<JsonWriter.Members<ILoggingEvent>> coreMembers,
+            Consumer<JsonWriter.Members<ILoggingEvent>> traceMembers,
             Consumer<JsonWriter.Members<ILoggingEvent>> schemaMembers,
             StructuredLoggingJsonMembersCustomizer<?> customizer) {
         super(
@@ -83,12 +89,12 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
                             ValueProcessor.of(AbstractJsonLineFormatter::jsonSafe));
                 },
                 customizer);
-        this.fallbackWriter =
-                JsonWriter.<FormatFailure>of(
+        this.reducedWriter =
+                JsonWriter.<ReducedLine>of(
                                 members -> {
-                                    members.from(FormatFailure::event).usingMembers(coreMembers);
-                                    members.add(
-                                            FORMAT_ERROR, failure -> failure.cause().toString());
+                                    members.from(ReducedLine::event).usingMembers(coreMembers);
+                                    members.from(ReducedLine::event).usingMembers(traceMembers);
+                                    members.add(FORMAT_ERROR, line -> line.cause().toString());
                                 })
                         .withNewLineAtEnd();
     }
@@ -99,7 +105,7 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
             return super.format(event);
         } catch (RuntimeException ex) {
             // Last resort on purpose: whatever broke, a degraded line beats a silently lost one.
-            return this.fallbackWriter.writeToString(new FormatFailure(event, ex));
+            return this.reducedWriter.writeToString(new ReducedLine(event, ex));
         }
     }
 
@@ -109,9 +115,7 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
             return super.formatAsBytes(event, charset);
         } catch (RuntimeException ex) {
             // Same last resort as format(); Spring's encoder calls this variant.
-            return this.fallbackWriter
-                    .writeToString(new FormatFailure(event, ex))
-                    .getBytes(charset);
+            return this.reducedWriter.writeToString(new ReducedLine(event, ex)).getBytes(charset);
         }
     }
 
@@ -250,5 +254,5 @@ abstract class AbstractJsonLineFormatter extends JsonWriterStructuredLogFormatte
         }
     }
 
-    private record FormatFailure(ILoggingEvent event, RuntimeException cause) {}
+    private record ReducedLine(ILoggingEvent event, RuntimeException cause) {}
 }

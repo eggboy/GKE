@@ -1,10 +1,13 @@
 """Cloud Logging JSON formatter and root logging configuration."""
 
+import contextlib
 import io
 import json
 import logging
 import logging.handlers
 import queue
+import sys
+import threading
 import warnings
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -26,13 +29,13 @@ from python_logging.structured_logging import (
     TRACE_SAMPLED,
     AccessLogPathFilter,
     CloudLoggingJsonFormatter,
+    StructuredQueueHandler,
     configure_logging,
+    install_trace_record_factory,
 )
 from tests.support import PROJECT_ID, parse_line
 
 EmitFn = Callable[..., str]
-AGENT_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
-AGENT_SPAN_ID = "00f067aa0ba902b7"
 
 
 class Explosive:
@@ -106,58 +109,132 @@ def test_record_inside_a_span_carries_full_trace_resource_name(emit: EmitFn, sam
     assert trace.get_current_span() is trace.INVALID_SPAN
 
 
-def test_record_attributes_from_the_logging_instrumentation_win_over_the_current_span(emit: EmitFn) -> None:
+def _record(message: str) -> logging.LogRecord:
+    """A record created here and now, through the record factory, without any handler involved."""
+    named = logging.getLogger("tests.records")
+    return named.makeRecord(named.name, logging.INFO, __file__, 1, message, (), None)
+
+
+@pytest.mark.usefixtures("trace_stamps")
+def test_trace_stamped_at_creation_wins_over_the_span_current_at_format_time() -> None:
+    formatter = CloudLoggingJsonFormatter(PROJECT_ID)
     tracer = TracerProvider(sampler=ALWAYS_ON).get_tracer("tests")
-    with tracer.start_as_current_span("checkout"):
-        payload = _payload(
-            emit(
-                logging.INFO,
-                "stamped at creation",
-                extra={"otelTraceID": AGENT_TRACE_ID, "otelSpanID": AGENT_SPAN_ID, "otelTraceSampled": False},
-            )
-        )
+    with tracer.start_as_current_span("request") as span:
+        context = span.get_span_context()
+        record = _record("stamped at creation")
+    with tracer.start_as_current_span("unrelated"):
+        payload = _payload(formatter.format(record) + "\n")
 
-    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{AGENT_TRACE_ID}"
-    assert payload[SPAN_ID] == AGENT_SPAN_ID
-    assert payload[TRACE_SAMPLED] is False
-    assert not any(key.startswith("otel") for key in payload)
+    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{context.trace_id:032x}"
+    assert payload[SPAN_ID] == f"{context.span_id:016x}"
+    assert payload[TRACE_SAMPLED] is True
+    assert not any(key.startswith("_") for key in payload)
 
 
-def test_zero_record_attributes_mean_no_span(emit: EmitFn) -> None:
-    payload = _payload(
-        emit(logging.INFO, "no span", extra={"otelTraceID": "0", "otelSpanID": "0", "otelTraceSampled": False})
-    )
+@pytest.mark.usefixtures("trace_stamps")
+def test_record_created_outside_a_span_has_no_trace_even_when_formatted_inside_one() -> None:
+    formatter = CloudLoggingJsonFormatter(PROJECT_ID)
+    record = _record("no span")
+    with TracerProvider(sampler=ALWAYS_ON).get_tracer("tests").start_as_current_span("unrelated"):
+        payload = _payload(formatter.format(record) + "\n")
 
     assert TRACE not in payload
+    assert SPAN_ID not in payload
+
+
+@pytest.mark.usefixtures("no_trace_stamps")
+def test_record_without_a_stamp_gets_the_span_current_at_format_time(emit: EmitFn) -> None:
+    with TracerProvider(sampler=ALWAYS_ON).get_tracer("tests").start_as_current_span("checkout") as span:
+        context = span.get_span_context()
+        payload = _payload(emit(logging.INFO, "formatter used on its own"))
+
+    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{context.trace_id:032x}"
+    assert payload[SPAN_ID] == f"{context.span_id:016x}"
+
+
+@pytest.mark.usefixtures("trace_stamps")
+def test_trace_record_factory_is_installed_once() -> None:
+    installed = logging.getLogRecordFactory()
+
+    install_trace_record_factory()
+
+    assert logging.getLogRecordFactory() is installed
+
+
+def test_attributes_of_the_opentelemetry_logging_instrumentation_are_not_user_fields(emit: EmitFn) -> None:
+    extra = {
+        "otelTraceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "otelSpanID": "00f067aa0ba902b7",
+        "otelServiceName": "x",
+    }
+    payload = _payload(emit(logging.INFO, "instrumentation installed as well", extra=extra))
+
     assert not any(key.startswith("otel") for key in payload)
+    assert TRACE not in payload
 
 
-def test_queue_handler_keeps_the_trace_through_the_record_attributes() -> None:
+@contextlib.contextmanager
+def _queued_logger(
+    handler_type: type[logging.handlers.QueueHandler], formatter: logging.Formatter | None = None
+) -> Iterator[tuple[logging.Logger, io.StringIO]]:
+    """A logger whose records cross a queue; the formatter under test runs on the listener thread."""
     stream = io.StringIO()
     target = logging.StreamHandler(stream)
-    target.setFormatter(CloudLoggingJsonFormatter(PROJECT_ID))
+    target.setFormatter(formatter or CloudLoggingJsonFormatter(PROJECT_ID))
     records: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
     listener = logging.handlers.QueueListener(records, target)
-    logger = logging.getLogger("tests.queued")
-    logger.handlers = [logging.handlers.QueueHandler(records)]
-    logger.propagate = False
-    logger.setLevel(logging.DEBUG)
+    named = logging.getLogger("tests.queued")
+    named.handlers = [handler_type(records)]
+    named.propagate = False
+    named.setLevel(logging.DEBUG)
     listener.start()
     try:
-        tracer = TracerProvider(sampler=ALWAYS_ON).get_tracer("tests")
-        with tracer.start_as_current_span("checkout"):
-            try:
-                raise ValueError("boom")
-            except ValueError:
-                logger.exception("queued", extra={"otelTraceID": AGENT_TRACE_ID, "otelSpanID": AGENT_SPAN_ID})
+        yield named, stream
     finally:
-        listener.stop()
-        logger.handlers = []
+        listener.stop()  # drains the queue: the stream is complete once the block is left
+        named.handlers = []
+
+
+@pytest.mark.usefixtures("trace_stamps")
+@pytest.mark.parametrize("handler_type", [logging.handlers.QueueHandler, StructuredQueueHandler])
+def test_queue_handlers_keep_the_trace_of_the_logging_thread(
+    handler_type: type[logging.handlers.QueueHandler],
+) -> None:
+    tracer = TracerProvider(sampler=ALWAYS_ON).get_tracer("tests")
+    with _queued_logger(handler_type) as (named, stream), tracer.start_as_current_span("checkout") as span:
+        context = span.get_span_context()
+        named.warning("formatted on the listener thread")
     payload = _payload(stream.getvalue())
 
-    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{AGENT_TRACE_ID}"
-    assert payload["message"].startswith("queued\nTraceback (most recent call last):")
-    assert payload["message"].rstrip().endswith("ValueError: boom")
+    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{context.trace_id:032x}"
+    assert payload[SPAN_ID] == f"{context.span_id:016x}"
+    assert payload[TRACE_SAMPLED] is True
+
+
+@pytest.mark.usefixtures("quiet_capture_handler")
+def test_structured_queue_handler_keeps_the_reduced_line_for_a_bad_format_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _queued_logger(StructuredQueueHandler) as (named, stream):
+        named.info("value %s %s", "only-one")
+    payload = _payload(stream.getvalue())
+
+    assert payload["message"] == "value %s %s"
+    assert payload[FORMAT_ERROR].startswith("TypeError: ")
+    assert capsys.readouterr().err == "", "nothing may reach stderr"
+
+
+def test_structured_queue_handler_leaves_the_traceback_to_the_json_formatter() -> None:
+    formatter = CloudLoggingJsonFormatter(PROJECT_ID, message_max_length=20)
+    with _queued_logger(StructuredQueueHandler, formatter) as (named, stream):
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            named.exception("0123456789abcdefghijklmnopqrstuvwxyz")
+    message = _payload(stream.getvalue())["message"]
+
+    assert message.startswith("0123456789abcdefghij... [16 more characters]\nTraceback (most recent call last):")
+    assert message.endswith("ValueError: boom"), "the message cap must not reach into the traceback"
 
 
 def test_exception_traceback_and_stack_info_are_kept(emit: EmitFn) -> None:
@@ -216,6 +293,25 @@ def test_default_message_cap_keeps_a_huge_message_under_the_cloud_logging_entry_
 
     assert len(line.encode()) < 256 * 1024
     assert _payload(line)["message"].endswith(" more characters]")
+
+
+def test_lone_surrogate_is_written_as_a_question_mark(capsys: pytest.CaptureFixture[str]) -> None:
+    written = io.BytesIO()
+    stream = io.TextIOWrapper(written, encoding="utf-8", errors="strict", write_through=True)
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(CloudLoggingJsonFormatter(PROJECT_ID))
+    named = logging.getLogger("tests.surrogates")
+    named.handlers = [handler]
+    named.propagate = False
+    try:
+        named.warning("name=%s", json.loads('"\\ud800"'), extra={"city": "\udc80 서울"})
+    finally:
+        named.handlers = []
+    payload = _payload(written.getvalue().decode("utf-8"))
+
+    assert payload["message"] == "name=?"
+    assert payload["city"] == "? 서울"
+    assert capsys.readouterr().err == "", "the stream must not refuse the line"
 
 
 def test_extra_fields_become_top_level_keys_but_cannot_shadow_reserved_ones(emit: EmitFn) -> None:
@@ -310,24 +406,60 @@ def test_value_whose_str_raises_falls_back_to_a_reduced_line(emit: EmitFn, capsy
     assert capsys.readouterr().err == ""
 
 
+@pytest.mark.parametrize("broken", ["format string", "extra value"])
+def test_reduced_line_keeps_the_trace_of_its_request(emit: EmitFn, broken: str) -> None:
+    with TracerProvider(sampler=ALWAYS_ON).get_tracer("tests").start_as_current_span("checkout") as span:
+        context = span.get_span_context()
+        if broken == "format string":
+            line = emit(logging.INFO, "value %s %s", "only-one")
+        else:
+            line = emit(logging.INFO, "still logged", extra={"bad": Explosive()})
+    payload = _payload(line)
+
+    assert FORMAT_ERROR in payload
+    assert payload[TRACE] == f"projects/{PROJECT_ID}/traces/{context.trace_id:032x}"
+    assert payload[SPAN_ID] == f"{context.span_id:016x}"
+    assert payload[TRACE_SAMPLED] is True
+
+
 def test_source_location_can_be_switched_off(emit: EmitFn) -> None:
     payload = _payload(emit(logging.INFO, "x", formatter=CloudLoggingJsonFormatter(PROJECT_ID, source_location=False)))
 
     assert SOURCE_LOCATION not in payload
 
 
-def test_access_log_filter_drops_the_quiet_paths_only() -> None:
-    quiet = AccessLogPathFilter(["/healthz"])
+def _access_record(path: str, status: int) -> logging.LogRecord:
     make = logging.getLogger("uvicorn.access").makeRecord
+    return make(
+        "uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', ("c", "GET", path, "1.1", status), None
+    )
 
-    def access_record(path: str) -> logging.LogRecord:
-        args = ("c", "GET", path, "1.1", 200)
-        return make("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', args, None)
 
-    assert quiet.filter(access_record("/healthz")) is False
-    assert quiet.filter(access_record("/healthz?verbose=1")) is False
-    assert quiet.filter(access_record("/orders")) is True
-    assert quiet.filter(make("uvicorn.access", logging.INFO, "", 0, "plain %s", ("x",), None)) is True
+def test_access_log_filter_drops_successful_requests_to_the_quiet_paths_only() -> None:
+    quiet = AccessLogPathFilter(["/healthz"])
+    plain = logging.getLogger("uvicorn.access").makeRecord(
+        "uvicorn.access", logging.INFO, "", 0, "plain %s", ("x",), None
+    )
+
+    assert quiet.filter(_access_record("/healthz", 200)) is False
+    assert quiet.filter(_access_record("/healthz?verbose=1", 204)) is False
+    assert quiet.filter(_access_record("/orders", 200)) is True
+    assert quiet.filter(plain) is True
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+def test_access_log_filter_keeps_a_failed_health_probe(status: int) -> None:
+    record = _access_record("/healthz", status)
+
+    assert AccessLogPathFilter(["/healthz"]).filter(record) is True
+    assert record.getMessage() == f'c - "GET /healthz HTTP/1.1" {status}'
+
+
+def test_access_log_filter_cuts_the_query_string() -> None:
+    record = _access_record("/orders?cartId=cart-1001&access_token=review-canary", 200)
+
+    assert AccessLogPathFilter().filter(record) is True
+    assert record.getMessage() == 'c - "GET /orders HTTP/1.1" 200'
 
 
 @pytest.mark.usefixtures("restore_logging_state")
@@ -353,7 +485,47 @@ def test_configure_logging_routes_uvicorn_and_warnings_through_one_json_handler(
     lines = [json.loads(line) for line in buffer.getvalue().splitlines()]
     assert [line["logger"] for line in lines] == ["py.warnings", "uvicorn.access"]
     assert "deprecated knob" in lines[0]["message"]
-    assert lines[1]["message"].endswith('"POST /orders?cartId=1 HTTP/1.1" 200')
+    assert lines[1]["message"].endswith('"POST /orders HTTP/1.1" 200')
+
+
+@pytest.mark.usefixtures("restore_logging_state")
+def test_configure_logging_leaves_an_access_log_that_uvicorn_switched_off() -> None:
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.handlers = []  # the state uvicorn --no-access-log leaves behind
+    uvicorn_access.propagate = False
+    buffer = io.StringIO()
+
+    configure_logging(stream=buffer)
+    uvicorn_access.info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:1", "POST", "/orders", "1.1", 200)
+
+    assert uvicorn_access.hasHandlers() is False, "uvicorn asks this before it logs a request"
+    assert buffer.getvalue() == ""
+
+
+@pytest.mark.usefixtures("restore_logging_state")
+def test_configure_logging_turns_uncaught_exceptions_into_json_lines(capsys: pytest.CaptureFixture[str]) -> None:
+    buffer = io.StringIO()
+    configure_logging(stream=buffer)
+
+    def die() -> None:
+        raise RuntimeError("worker died")
+
+    try:
+        raise RuntimeError("main died")
+    except RuntimeError:
+        sys.excepthook(*sys.exc_info())
+    worker = threading.Thread(target=die, name="worker-1")
+    worker.start()
+    worker.join()
+    crashed, thread_died = (parse_line(line + "\n") for line in buffer.getvalue().splitlines())
+
+    assert crashed["severity"] == "CRITICAL"
+    assert crashed["message"].startswith("uncaught exception\nTraceback (most recent call last):")
+    assert crashed["message"].endswith("RuntimeError: main died")
+    assert thread_died["severity"] == "ERROR"
+    assert thread_died["message"].startswith("uncaught exception in thread worker-1\nTraceback")
+    assert thread_died["message"].endswith("RuntimeError: worker died")
+    assert capsys.readouterr().err == "", "no plain-text traceback on stderr"
 
 
 @pytest.mark.usefixtures("restore_logging_state")

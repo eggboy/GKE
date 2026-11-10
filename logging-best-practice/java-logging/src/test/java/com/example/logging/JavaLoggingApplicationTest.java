@@ -112,6 +112,37 @@ class JavaLoggingApplicationTest {
     }
 
     @Test
+    void exceptionThatEndsAThreadIsAJsonLineAndNotPlainTextOnStderr(CapturedOutput output)
+            throws Exception {
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        JavaLoggingApplication.logUncaughtExceptions();
+        try {
+            Thread worker =
+                    new Thread(
+                            () -> {
+                                throw new IllegalStateException("worker died");
+                            },
+                            "worker-1");
+            worker.start();
+            worker.join();
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous);
+        }
+
+        assertThat(linesLoggedBy(output, JavaLoggingApplication.class))
+                .filteredOn(line -> "ERROR".equals(line.get("severity")))
+                .singleElement()
+                .satisfies(
+                        line ->
+                                assertThat((String) line.get("message"))
+                                        .startsWith(
+                                                "uncaught exception in thread worker-1\n"
+                                                        + "java.lang.IllegalStateException: worker"
+                                                        + " died\n\tat "));
+        assertThat(output.getErr()).doesNotContain("Exception in thread");
+    }
+
+    @Test
     void frameworkLinesCarryNoCommonsLoggingTag(CapturedOutput output) throws Exception {
         mvc.perform(get("/healthz")).andExpect(status().isOk());
 

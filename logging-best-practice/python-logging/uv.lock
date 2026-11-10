@@ -530,20 +530,6 @@ wheels = [
 ]
 
 [[package]]
-name = "opentelemetry-instrumentation-logging"
-version = "0.66b2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-semantic-conventions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/23/2f/900c10a10c780f06c0e90e885e5fdcb95f93a91efbd73d3b87d11c6ac72a/opentelemetry_instrumentation_logging-0.66b2.tar.gz", hash = "sha256:a94210291ae10395ad617c2b69bd7c2e10f77818b8beac11368460f47c370eb1", size = 20350, upload-time = "2026-10-29T17:38:34.161Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/52/1f18b14487fa599f96537b2550c7096f824216fedeeb03fdb7f0f67db847/opentelemetry_instrumentation_logging-0.66b2-py3-none-any.whl", hash = "sha256:6141bc09a7868235172748e8a2cd9806549d742b4f5019ce2a571e8c157e5e7d", size = 15926, upload-time = "2026-10-29T17:37:36.938Z" },
-]
-
-[[package]]
 name = "opentelemetry-proto"
 version = "1.45.2"
 source = { registry = "https://pypi.org/simple" }
@@ -783,7 +769,6 @@ dependencies = [
     { name = "opentelemetry-distro" },
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation-fastapi" },
-    { name = "opentelemetry-instrumentation-logging" },
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
@@ -804,7 +789,6 @@ requires-dist = [
     { name = "opentelemetry-distro", specifier = ">=0.54b0,<1" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.39,<2" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.54b0,<1" },
-    { name = "opentelemetry-instrumentation-logging", specifier = ">=0.54b0,<1" },
     { name = "pydantic", specifier = ">=2.9.0,<3" },
     { name = "uvicorn", specifier = ">=0.34,<1" },
 ]

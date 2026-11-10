@@ -16,13 +16,15 @@ Run with `java -jar` on a laptop, without the agent, the lines lack `logging.goo
 | File | Role |
 | :--- | :--- |
 | [`GoogleCloudStructuredLogFormatter.java`](src/main/java/com/example/logging/GoogleCloudStructuredLogFormatter.java) | The Cloud Logging schema: severity names, the `logging.googleapis.com/*` keys, the project-prefixed trace. A Spring Boot `StructuredLogFormatter` (3.4+), no Logback XML. |
-| [`AbstractJsonLineFormatter.java`](src/main/java/com/example/logging/AbstractJsonLineFormatter.java) | What both formatters share: message plus stack trace, MDC and key-value pairs merged into one map, the message cap, `NaN` as a string, the fallback line. Copy it along with either formatter. |
+| [`AbstractJsonLineFormatter.java`](src/main/java/com/example/logging/AbstractJsonLineFormatter.java) | What both formatters share: message plus stack trace, MDC and key-value pairs merged into one map, the message cap, `NaN` as a string, the reduced line that keeps its trace. Copy it along with either formatter. |
 | [`OpenTelemetryStructuredLogFormatter.java`](src/main/java/com/example/logging/OpenTelemetryStructuredLogFormatter.java) | Vendor-neutral schema for AKS, EKS, Loki, or Collector pipelines (see [`PORTABILITY.md`](PORTABILITY.md)). |
 | [`application.yaml`](src/main/resources/application.yaml) | Activates the formatter and bounds stack traces and messages. |
 | [`GoogleCloudStructuredLogFormatterTest.java`](src/test/java/com/example/logging/GoogleCloudStructuredLogFormatterTest.java), [`OpenTelemetryStructuredLogFormatterTest.java`](src/test/java/com/example/logging/OpenTelemetryStructuredLogFormatterTest.java) | Both formatters through Spring's `StructuredLogEncoder`. [`LogCapture.java`](src/test/java/com/example/logging/LogCapture.java) parses every line with strict duplicate detection. |
 | [`ApiExceptionHandlerTest.java`](src/test/java/com/example/logging/ApiExceptionHandlerTest.java), [`JavaLoggingApplicationTest.java`](src/test/java/com/example/logging/JavaLoggingApplicationTest.java) | Status codes and log levels of the handler; the whole application with its real `application.yaml`, asserting on stdout. |
 | [`OrderController.java`](src/main/java/com/example/logging/OrderController.java), [`ApiExceptionHandler.java`](src/main/java/com/example/logging/ApiExceptionHandler.java) | Three endpoints to see a key-value line, a 404 and a 500 with a `Caused by:` chain. |
-| [`Dockerfile`](Dockerfile) | Runs under the OpenTelemetry Java agent with nothing but JSON on stdout and stderr. |
+| [`SpanQueryRedactionFilter.java`](src/main/java/com/example/logging/SpanQueryRedactionFilter.java) | Servlet filter: the server span keeps the names of the query parameters and loses their values, so a token in a URL does not reach Cloud Trace. On by default; `app.tracing.redact-url-query: false` switches it off. [`SpanQueryRedactionFilterTest.java`](src/test/java/com/example/logging/SpanQueryRedactionFilterTest.java) runs it against a span of the SDK. |
+| [`JavaLoggingApplication.java`](src/main/java/com/example/logging/JavaLoggingApplication.java) | `main`, and the default uncaught-exception handler that logs a thread's last exception instead of leaving it to stderr. |
+| [`Dockerfile`](Dockerfile) | Runs under the OpenTelemetry Java agent with nothing but JSON on stdout and stderr, the agent's own log included. Base images are pinned by digest and the agent jar by SHA-256. |
 | [`k8s/java-logging.yaml`](k8s/java-logging.yaml) | `Instrumentation` CR with `logger_provider: null` plus Deployment (pinning `LOGGING_STRUCTURED_FORMAT_CONSOLE`) and Service for the `glb-trace-adk` cluster. |
 
 ## Run it
@@ -30,7 +32,7 @@ Run with `java -jar` on a laptop, without the agent, the lines lack `logging.goo
 Spring Boot 4.1, Java 21, Maven. Note for Boot 4: `spring-boot-starter-webmvc` no longer brings JSON; `spring-boot-starter-jackson` is declared, otherwise every response returns 406.
 
 ```bash
-mvn spotless:apply verify                                   # format, compile, 53 tests
+mvn spotless:apply verify                                   # format, compile, 67 tests
 GOOGLE_CLOUD_PROJECT=my-project java -jar target/java-logging-0.1.0.jar
 curl -X POST 'localhost:8080/orders?cartId=cart-1001'       # INFO line with order_id, cart_id, total
 curl -X POST 'localhost:8080/orders?cartId=cart-9'          # 404, WARNING line with cart_id
@@ -42,12 +44,13 @@ Without `GOOGLE_CLOUD_PROJECT` `GoogleCloudStructuredLogFormatter` refuses to st
 
 On the cluster, `scripts/02-build-deploy-gke.sh` in `glb-trace-adk` is the model: build the image with Cloud Build, `kubectl apply -f k8s/java-logging.yaml`, then `gcloud logging read 'trace="projects/PROJECT_ID/traces/<id>"'` shows the Java entries next to the load balancer entries.
 
-Two properties belong to this sample's formatters, not to Spring Boot:
+Three properties belong to this sample, not to Spring Boot:
 
 | Property | Default | Effect |
 | :--- | :--- | :--- |
 | `app.logging.message-max-length` | `65536` | Characters of the log message kept; the rest becomes `... [N more characters]`. The stack trace keeps its own limits. `0` disables the cap. |
 | `app.logging.source-location` | `true` | `false` drops `logging.googleapis.com/sourceLocation` and the stack walk per event behind it. GKE formatter only. |
+| `app.tracing.redact-url-query` | `true` | `true` rewrites `url.query` on the server span to `cartId=REDACTED&access_token=REDACTED`. `false` does not register the filter, and the query string reaches Cloud Trace as the client sent it. As an environment variable: `APP_TRACING_REDACT_URL_QUERY`. |
 
 ## What goes into each line
 
@@ -65,14 +68,16 @@ Two properties belong to this sample's formatters, not to Spring Boot:
 | every other top-level key | MDC entries and SLF4J `addKeyValue(...)` pairs, merged into one map: a key-value pair replaces an MDC entry of the same name |
 | names user data cannot use | the fields above, keys starting with `_`, `stream` (GKE removes it), `time`, `log_format_error`, and any other `logging.googleapis.com/*` key |
 | values | numbers, booleans, strings, maps and lists as JSON; anything else through `toString()`; `NaN` and `Infinity` as strings, because bare they are not JSON |
+| `log_format_error` | only on a reduced line, which has timestamp, severity, message, logger, thread, the timestamp pair and the trace fields. It holds the exception that stopped the full document from being written |
 
 ## The stack-trace caveat, and why the JSON looks like this
 
 A Java exception printed as text is 30 to 80 lines. The container runtime records one line at a time, so without structured logging each `\tat` frame becomes its own `LogEntry`, at stdout's default severity and without the trace ID. The open-source answer for Kubernetes: never emit multi-line text; write one JSON object per event with the trace as an escaped string. Fluent Bit's built-in `java` multiline parser exists for the case where you own the agent configuration, which you do not on GKE.
 
-Two Java-specific consequences, both handled in `application.yaml`:
+Three consequences. The first and the last are handled in `application.yaml`; the second is a limit of this sample:
 
-- **A JSON line above 256 KiB does not arrive as a structured entry.** The documentation says Cloud Logging drops it. On the test cluster a 300 KB line arrived as two plain-text entries at `INFO`, 62 KB short, and a 200 KB line arrived intact. Java traces through Tomcat, Spring MVC and a client library can get there, and so can a logged request body. `logging.structured.json.stacktrace.max-throwable-depth: 40` with `include-common-frames: false` bounds every `Caused by:` block; `max-length: 131072` is the last-resort cap on the trace, kept high because it chops the tail of the text, and with Java's default root-last order the tail is the root cause. `app.logging.message-max-length: 65536` bounds the message in front of it. Key-value pairs are not bounded; keep payloads out of them.
+- **A JSON line above 256 KiB does not arrive as a structured entry.** The documentation says Cloud Logging drops it. On the test cluster a 300 KB line arrived as two plain-text entries at `INFO`, 62 KB short, and a 200 KB line arrived intact. Java traces through Tomcat, Spring MVC and a client library can get there, and so can a logged request body. `logging.structured.json.stacktrace.max-throwable-depth: 40` with `include-common-frames: false` bounds every `Caused by:` block; `max-length: 131072` is the last-resort cap on the trace, kept high because it chops the tail of the text, and with Java's default root-last order the tail is the root cause. `app.logging.message-max-length: 65536` bounds the message in front of it.
+- **Those caps count characters, and the limit counts bytes in the stored entry. This sample does not bound the line in bytes.** 65,536 plus 131,072 ASCII characters are 197 KB and arrive. An exception whose message is 131,072 Korean characters is 393 KB and does not, and neither does a key-value pair of 300,000 characters. Cloud Logging also stores every number as 11 bytes however short it is written, so a line that is one 80 KB array of small numbers is over the limit as well. Such a line is not truncated: it never arrives, or it arrives as broken text (the table of hand-made lines below shows both). Keep payloads and large collections out of log lines.
 - **Error Reporting parses the trace out of `message`** when it is in plain JVM format. Keep `root: last` and `include-hashes: false` (the defaults); `root: first` rewrites the captions to `Wrapped by:`. Putting the trace in `message` rather than a separate `stack_trace` field also keeps the log message as the error's title; with a `stack_trace` field Error Reporting takes the title from the exception header instead.
 
 ## Checked on a live cluster
@@ -107,6 +112,39 @@ The sample itself, called with a `traceparent` header:
 
 Those requests ran against an image that wrote only the `timestamp` string, and each entry was stamped 2 to 13 ms after its event: the moment the container runtime received the line. With `timestampSeconds` and `timestampNanos` on the line, a second run gave entries whose timestamp equals `jsonPayload.timestamp` to the nanosecond, with the numeric pair gone from `jsonPayload`.
 
+### Third run: the image as it is now
+
+GKE `v1.36.4-gke.2377000` with Managed OpenTelemetry, 10 November 2026. Cloud Build built the image, so the digest pins and the SHA-256 check of the agent jar passed there. The pod wrote 17 lines and all 17 arrived as `jsonPayload`; nothing arrived as text.
+
+| What | Result |
+| :--- | :--- |
+| The agent's own log, `OTEL_JAVAAGENT_LOGGING=application` | one `INFO` entry `opentelemetry-javaagent - version: 2.22.0` from logger `io.opentelemetry.javaagent.tooling.VersionLogger`; no export failure logged |
+| `POST /orders?cartId=cart-1001&access_token=...`, sampled | 200; one `INFO` under the trace with `spanId`, `traceSampled: true`, `sourceLocation`, `order_id`, `cart_id`, `total`. One span in Cloud Trace with `url.query: cartId=REDACTED&access_token=REDACTED`; the token is in no span |
+| same, unsampled | 200; one `INFO`, trace-linked, `traceSampled` false; no span |
+| `GET /boom` | 500; one `ERROR` with the stack trace in `message` |
+| `POST /orders?cartId=cart-9` | 404; one `WARNING` with `cart_id` |
+| `GET /healthz` | 200; no entry, one span (probes are traced, see the traps table) |
+| `GET /nope` | 404; no entry |
+
+Hand-made lines of an exact size and shape, written to the stdout of a pod, to find where the limit is and how it is counted:
+
+| Line on stdout | What arrived in Cloud Logging |
+| :--- | :--- |
+| 180,000 to 240,000 bytes with the full set of Cloud Logging members; 245,000 to 261,000 bytes of ASCII and 250,000 bytes of Korean with `severity`, `logger`, the timestamp pair and `message` only | one `jsonPayload` entry each |
+| 240,000 bytes whose message is all `<`, all emoji, all `"` or all newlines | one `jsonPayload` entry each |
+| 262,144 bytes | nothing, no entry at all |
+| 300,000 bytes | two `textPayload` entries at `INFO`, 200,000 and 37,855 characters |
+| 13,325 string members, 200,000 bytes | one `jsonPayload` entry |
+| 12,411 small numeric members, 200,000 bytes | one `jsonPayload` entry |
+| 14,705 small numeric members, 240,000 bytes | nothing |
+| 7,561 small numeric members (120,000 bytes) and 120,000 bytes of message | nothing |
+| one array of 20,000 zeros, 60 KB | one `jsonPayload` entry |
+| one array of 26,666 zeros, 80 KB | nothing |
+
+The limit is the 256 KiB of the stored entry, with what GKE adds to it counted in. A line over it does not degrade to text; it disappears. Text is counted as it is written, in any script and with any escapes. Numbers are not: the lines of numeric members and the array of zeros were lost far below 256 KiB on the wire. This sample caps the message and the stack trace in characters and nothing else, so it can still write lines of the lost shapes.
+
+Not exercised on the cluster: the uncaught-exception handler, because the sample starts no thread of its own, and the `Failed to export spans` line, because the export worked. A test covers the first. A local run of the image against a collector that could not be reached covers the second: every stdout line JSON, stderr empty, one `ERROR` line `Failed to export spans`.
+
 ## Trace correlation and the traps around it
 
 The `Instrumentation` CR injects `OTEL_*` environment variables, nothing else. The Java agent in the Dockerfile reads them, and its `logback-mdc` instrumentation is what fills the MDC keys the formatter reads.
@@ -116,14 +154,20 @@ The `Instrumentation` CR injects `OTEL_*` environment variables, nothing else. T
 | Agent exports logs over OTLP by default | every line ingested twice (stdout JSON and OTLP) | `logger_provider: null` in the CR, `OTEL_LOGS_EXPORTER=none` in the image (for Azure's `applicationinsights-agent.jar`, set `APPLICATIONINSIGHTS_INSTRUMENTATION_LOGGING_LEVEL=OFF` instead) |
 | Upstream OpenTelemetry Operator `inject-java: "true"` with this image | mounts and attaches a second `-javaagent` next to the one in the `ENTRYPOINT` | pass plain `OTEL_*` env vars or use `instrumentation.opentelemetry.io/inject-sdk: "true"` |
 | Agent jar fetched with `ADD <url>` | file mode 0600 owned by root; the non-root user cannot read it and the JVM exits at startup | `chmod 0644` in the build stage |
-| Agent prints its banner to stderr | plain-text `ERROR` entries at startup | `OTEL_JAVAAGENT_LOGGING=none` |
+| Agent jar and base images taken on trust | a replaced release asset or a moved tag goes into the image unnoticed | the build checks the jar against `OTEL_AGENT_SHA256`; both base images are pinned by digest |
+| Agent prints its own log to stderr | plain-text `ERROR` entries at startup | `OTEL_JAVAAGENT_LOGGING=application`: the agent logs through the application's Logback, so its version line and its warnings are JSON |
+| `OTEL_JAVAAGENT_LOGGING=none` | stderr is clean, and a collector that cannot be reached loses every trace without one log line | `application` instead: a failed export is one `ERROR` line, `Failed to export spans` |
 | JVM flags in `JAVA_TOOL_OPTIONS` | the JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` on stderr at every start: an `ERROR` entry | flags on the `ENTRYPOINT` command line |
 | Class data sharing with an agent on the bootstrap class path | `warning: Sharing is only supported for boot loader classes` on stderr: an `ERROR` entry | `-Xshare:off` |
 | GC logs and other JVM logging | plain-text entries | `-Xlog:disable`, `-XX:+ExitOnOutOfMemoryError` |
 | Spring Boot banner | multi-line plain text | `spring.main.banner-mode=off` |
 | `System.out.println`, `printStackTrace()` | bypass Logback | code review or a Checkstyle `RegexpSingleline` rule |
+| An exception that ends a thread of your own | the JVM prints `Exception in thread "..."` and the stack trace on stderr: one `ERROR` entry per frame | `Thread.setDefaultUncaughtExceptionHandler` in `JavaLoggingApplication.main` logs it as one line |
+| Thousands of numbers in a key-value pair | Cloud Logging stores each number as 11 bytes: a line of small numbers is several times larger in the entry than on the wire, and an entry over 256 KiB never arrives | not handled here; keep large collections out of key-value pairs |
+| Message and stack-trace caps count characters | a Korean stack trace of 131,072 characters is 393 KB, above the entry limit: the entry never arrives, or arrives as text without severity or trace | not handled here; the caps hold a line of ASCII under 197 KB, and nothing bounds the line in bytes |
+| Query strings in span attributes | the agent records `url.query` on every server span, `?access_token=...` included; its redaction setting covers client spans only | `SpanQueryRedactionFilter` writes the attribute again at the head of the filter chain: `cartId=REDACTED&access_token=REDACTED`. A request Tomcat rejects before the chain keeps its query string. `app.tracing.redact-url-query: false` switches the filter off |
 | `@ExceptionHandler(Exception.class)` on its own | every client mistake (missing parameter, unknown path, wrong method) becomes a 500 and an `ERROR` entry with a stack trace | `ApiExceptionHandler extends ResponseEntityExceptionHandler` |
-| A name written twice, or a value whose `toString()` throws | Spring Boot's `JsonWriter` throws inside the appender and the line never reaches stdout. `logging.structured.json.add` or `rename` producing a name that an MDC key also uses is one way in | the formatter writes timestamp, severity, message, logger, thread and `log_format_error` instead; alert on `jsonPayload.log_format_error:*` |
+| A name written twice, or a value whose `toString()` throws | Spring Boot's `JsonWriter` throws inside the appender and the line never reaches stdout. `logging.structured.json.add` or `rename` producing a name that an MDC key also uses is one way in | the formatter writes timestamp, severity, message, logger, thread, the trace fields and `log_format_error` instead; alert on `jsonPayload.log_format_error:*` |
 | Logback `AsyncAppender` | `sourceLocation` is empty and the `Span.current()` fallback sees the worker thread | `includeCallerData=true` on the appender; the agent's MDC keys carry the trace |
 | Health probes become root traces | kubelet and load balancer probes traced at the CR's ratio 1.0 | not handled here; the Java agent needs a sampler extension (`RuleBasedRoutingSampler`) or you accept the noise |
 | Formatter built for every Spring context | `@SpringBootTest` fails without a project id | `JavaLoggingApplicationTest` sets `google.cloud.project` as a test property; the formatter tests use a `MockEnvironment` |

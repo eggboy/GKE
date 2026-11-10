@@ -21,18 +21,24 @@ COPY --from=builder /app/.venv /app/.venv
 #                                         buffer fills; the logging handler flushes on its own either way
 #   PYTHONUTF8=1                          the formatter writes UTF-8 as is; without a UTF-8 stdout a non-ASCII
 #                                         character would raise inside the handler
-#   OTEL_PYTHON_FASTAPI_EXCLUDED_URLS     no span per readiness probe; the access-log filter does the same for logs
-#   OTEL_PYTHON_LOG_CORRELATION           left unset: "true" would make the logging instrumentation call
-#                                         logging.basicConfig() with a plain-text format
+#   OTEL_PYTHON_FASTAPI_EXCLUDED_URLS     no span per readiness probe; the access-log filter does the same for logs.
+#                                         The value is a regex searched in scheme://host/path, so it is anchored:
+#                                         a bare "healthz" also switches tracing off for /api/healthz-report and
+#                                         for every request to a host named healthz-gw.example.com. (\$ is a
+#                                         literal $ in a Dockerfile.)
+#   OTEL_LOGS_EXPORTER=none               stdout JSON is the single log path; the distro would otherwise build an
+#                                         OTLP log exporter
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
     OTEL_SERVICE_NAME="python-logging" \
     OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf" \
-    OTEL_PYTHON_FASTAPI_EXCLUDED_URLS="healthz"
+    OTEL_PYTHON_FASTAPI_EXCLUDED_URLS="/healthz\$" \
+    OTEL_LOGS_EXPORTER="none"
 USER appuser
 EXPOSE 8080
-# opentelemetry-instrument builds the OpenTelemetry SDK from OTEL_* and activates the FastAPI and logging
-# instrumentations before the app is imported. The OTLP log handler stays off: it is opt-in through
-# OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED, and stdout is the only log path.
+# opentelemetry-instrument builds the OpenTelemetry SDK from OTEL_* and activates the FastAPI instrumentation before
+# the app is imported. No logging instrumentation is installed: configure_logging() stamps the trace on each record
+# itself. If you add opentelemetry-instrumentation-logging, set OTEL_PYTHON_LOG_AUTO_INSTRUMENTATION=false, or it
+# puts an OTLP log handler on the root logger.
 CMD ["opentelemetry-instrument", "uvicorn", "python_logging.main:app", "--host", "0.0.0.0", "--port", "8080"]

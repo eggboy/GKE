@@ -43,8 +43,8 @@ import org.springframework.mock.env.MockEnvironment;
 
 /**
  * The Cloud Logging formatter through Spring's own encoder: the schema, trace correlation, stack
- * traces and user fields first, then Spring Boot's customizer, Logback's async appender, non-finite
- * numbers and the size of a Cloud Logging entry.
+ * traces and user fields first, then Spring Boot's customizer, the reduced line, Logback's async
+ * appender, non-finite numbers and the size of a Cloud Logging entry.
  */
 class GoogleCloudStructuredLogFormatterTest {
 
@@ -64,6 +64,15 @@ class GoogleCloudStructuredLogFormatterTest {
 
     private static MockEnvironment environment() {
         return new MockEnvironment().withProperty(PROJECT_PROPERTY, PROJECT_ID);
+    }
+
+    private static Object valueWhoseToStringThrows() {
+        return new Object() {
+            @Override
+            public String toString() {
+                throw new IllegalStateException("toString failed");
+            }
+        };
     }
 
     private Logger start(Environment environment) {
@@ -397,15 +406,8 @@ class GoogleCloudStructuredLogFormatterTest {
     @Test
     void valueWhoseToStringThrowsFallsBackToTheCoreLine() {
         Logger logger = start(environment());
-        Object explosive =
-                new Object() {
-                    @Override
-                    public String toString() {
-                        throw new IllegalStateException("toString failed");
-                    }
-                };
 
-        logger.atWarn().addKeyValue("bad", explosive).log("still logged");
+        logger.atWarn().addKeyValue("bad", valueWhoseToStringThrows()).log("still logged");
         Map<String, Object> payload = capture.json();
 
         assertThat(payload)
@@ -413,6 +415,41 @@ class GoogleCloudStructuredLogFormatterTest {
                 .containsEntry("message", "still logged")
                 .doesNotContainKey("bad");
         assertThat((String) payload.get(FORMAT_ERROR)).contains("toString failed");
+    }
+
+    @Test
+    void reducedLineKeepsTheTraceOfTheAgentMdcKeys() {
+        Logger logger = start(environment());
+        putAgentMdcKeys("01");
+
+        logger.atWarn().addKeyValue("bad", valueWhoseToStringThrows()).log("still logged");
+
+        assertThat(capture.json())
+                .containsKey(FORMAT_ERROR)
+                .containsEntry(TRACE, "projects/" + PROJECT_ID + "/traces/" + AGENT_TRACE_ID)
+                .containsEntry(SPAN_ID, AGENT_SPAN_ID)
+                .containsEntry(TRACE_SAMPLED, true)
+                .doesNotContainKeys(MDC_TRACE_ID, MDC_SPAN_ID, MDC_TRACE_FLAGS);
+    }
+
+    @Test
+    void reducedLineKeepsTheTraceOfTheCurrentSpan() {
+        Logger logger = start(environment());
+
+        SpanContext spanContext =
+                inSpan(
+                        Sampler.alwaysOn(),
+                        () ->
+                                logger.atWarn()
+                                        .addKeyValue("bad", valueWhoseToStringThrows())
+                                        .log("still logged"));
+
+        assertThat(capture.json())
+                .containsKey(FORMAT_ERROR)
+                .containsEntry(
+                        TRACE, "projects/" + PROJECT_ID + "/traces/" + spanContext.getTraceId())
+                .containsEntry(SPAN_ID, spanContext.getSpanId())
+                .containsEntry(TRACE_SAMPLED, true);
     }
 
     @Test

@@ -222,7 +222,7 @@ class OpenTelemetryStructuredLogFormatterTest {
     }
 
     @Test
-    void customizerNameCollisionFallsBackToTheCoreLine() {
+    void customizerNameCollisionFallsBackToAReducedLineThatKeepsTheTrace() {
         Logger logger =
                 start(
                         new MockEnvironment()
@@ -236,6 +236,9 @@ class OpenTelemetryStructuredLogFormatterTest {
         assertThat(payload)
                 .containsEntry("level", "INFO")
                 .containsEntry("message", "placed")
+                .containsEntry(TRACE_ID, AGENT_TRACE_ID)
+                .containsEntry(SPAN_ID, AGENT_SPAN_ID)
+                .containsEntry(TRACE_FLAGS, "01")
                 .doesNotContainKey("order_id");
         assertThat((String) payload.get(FORMAT_ERROR)).contains("order_id");
     }

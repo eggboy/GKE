@@ -120,15 +120,16 @@ public final class GoogleCloudStructuredLogFormatter extends AbstractJsonLineFor
         super(
                 cloudLoggingCoreMembers(
                         messageRenderer(environment, stackTracePrinter, throwableProxyConverter)),
+                traceMembers(tracePrefix(environment)),
                 cloudLoggingMembers(
-                        requiredProjectId(environment),
+                        tracePrefix(environment),
                         environment.getProperty(SOURCE_LOCATION_PROPERTY, Boolean.class, true),
                         contextPairs),
                 customizer);
     }
 
     /**
-     * The shared core plus the numeric timestamp pair. Being core, the pair is on the fallback line
+     * The shared core plus the numeric timestamp pair. Being core, the pair is on the reduced line
      * too, so that entry also carries the time of its event.
      */
     private static Consumer<JsonWriter.Members<ILoggingEvent>> cloudLoggingCoreMembers(
@@ -142,9 +143,25 @@ public final class GoogleCloudStructuredLogFormatter extends AbstractJsonLineFor
         };
     }
 
+    /**
+     * {@code trace}, {@code spanId} and {@code trace_sampled}. They are on the reduced line as
+     * well, so that a line which lost its fields is still found from its request.
+     */
+    private static Consumer<JsonWriter.Members<ILoggingEvent>> traceMembers(String tracePrefix) {
+        return members ->
+                members.from(GoogleCloudStructuredLogFormatter::traceContext)
+                        .whenNotNull()
+                        .usingMembers(
+                                trace -> {
+                                    trace.add(TRACE, context -> tracePrefix + context.traceId());
+                                    trace.add(SPAN_ID, TraceContext::spanId).whenNotNull();
+                                    trace.add(TRACE_SAMPLED, TraceContext::sampled);
+                                });
+    }
+
     private static Consumer<JsonWriter.Members<ILoggingEvent>> cloudLoggingMembers(
-            String projectId, boolean sourceLocation, ContextPairs contextPairs) {
-        String tracePrefix = "projects/" + projectId + "/traces/";
+            String tracePrefix, boolean sourceLocation, ContextPairs contextPairs) {
+        Consumer<JsonWriter.Members<ILoggingEvent>> trace = traceMembers(tracePrefix);
         return members -> {
             if (sourceLocation) {
                 members.add(SOURCE_LOCATION, GoogleCloudStructuredLogFormatter::callerFrame)
@@ -162,14 +179,7 @@ public final class GoogleCloudStructuredLogFormatter extends AbstractJsonLineFor
                                                             + frame.getMethodName());
                                 });
             }
-            members.from(GoogleCloudStructuredLogFormatter::traceContext)
-                    .whenNotNull()
-                    .usingMembers(
-                            trace -> {
-                                trace.add(TRACE, context -> tracePrefix + context.traceId());
-                                trace.add(SPAN_ID, TraceContext::spanId).whenNotNull();
-                                trace.add(TRACE_SAMPLED, TraceContext::sampled);
-                            });
+            trace.accept(members);
             members.add(LABELS, GoogleCloudStructuredLogFormatter::labels).whenNotEmpty();
             members.add(TAGS, AbstractJsonLineFormatter::tags).whenNotEmpty();
             // MDC entries and SLF4J key-value pairs become top-level fields.
@@ -185,6 +195,10 @@ public final class GoogleCloudStructuredLogFormatter extends AbstractJsonLineFor
                                                                     GoogleCloudStructuredLogFormatter
                                                                             ::isUserKey))));
         };
+    }
+
+    private static String tracePrefix(Environment environment) {
+        return "projects/" + requiredProjectId(environment) + "/traces/";
     }
 
     private static String requiredProjectId(Environment environment) {

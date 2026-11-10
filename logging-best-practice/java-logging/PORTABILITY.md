@@ -23,11 +23,13 @@ Spring Boot names its built-in structured formats after the schema they emit: `e
 ## What is portable, unchanged
 
 - **One JSON document per line, stack trace inside the line as `\n`-escaped text.** containerd and CRI-O write one record per line on every distribution, and every agent (Fluent Bit, Fluentd, Vector, the OpenTelemetry Collector `filelog` receiver, Azure Monitor agent, CloudWatch agent) reads them that way. This is the whole reason multi-line Java traces need handling in the application.
-- **Caps on the trace and on the message.** `logging.structured.json.stacktrace.*` applies to the built-in formats and to custom ones alike. `app.logging.message-max-length` belongs to this sample's two classes. Only the values are cloud-specific.
+- **Caps on the trace and on the message.** `logging.structured.json.stacktrace.*` applies to the built-in formats and to custom ones alike. `app.logging.message-max-length` belongs to this sample's two classes. Both count characters, not bytes. Only the values are cloud-specific.
 - **MDC entries and SLF4J key-value pairs as top-level fields, merged into one map, with reserved names protected.** `stream` stays reserved everywhere: Fluent Bit's CRI parser emits a `stream` field (`stdout`/`stderr`), and a pipeline that merges application JSON into the record without a key prefix collides on it.
-- **A line for every event.** `NaN` and `Infinity` are written as strings, because a bare `NaN` is not JSON. If writing the full document throws, the formatter writes timestamp, level, message, logger and thread plus `log_format_error`.
+- **A line for every event.** `NaN` and `Infinity` are written as strings, because a bare `NaN` is not JSON. If writing the full document throws, the formatter writes timestamp, level, message, logger, thread and the trace keys plus `log_format_error`, so the reduced line is still found from its request.
 - **The `timestamp` key.** No agent reads it unprompted. GKE `v1.37.1` kept the RFC 3339 string in `jsonPayload.timestamp`; the GKE class therefore also writes `timestampSeconds` and `timestampNanos`, which that agent does read. Elsewhere, tell the agent the key (Fluent Bit `Time_Key`, Collector `timestamp` parser) to get the event time instead of the ingestion time. Keep the field; it costs nothing and records when the event happened.
-- **The Dockerfile.** Agent jar readable by the non-root user, agent banner off (`OTEL_JAVAAGENT_LOGGING=none`), no OTLP log export (`OTEL_LOGS_EXPORTER=none`), JVM flags on the command line instead of `JAVA_TOOL_OPTIONS`, JVM stderr quiet (`-Xshare:off`, `-Xlog:disable`), Spring banner off. None of it mentions Google.
+- **The Dockerfile.** Agent jar checked against its SHA-256 and readable by the non-root user, the agent's own log routed through Logback (`OTEL_JAVAAGENT_LOGGING=application`, so an export that fails is a JSON line), no OTLP log export (`OTEL_LOGS_EXPORTER=none`), JVM flags on the command line instead of `JAVA_TOOL_OPTIONS`, JVM stderr quiet (`-Xshare:off`, `-Xlog:disable`), Spring banner off. None of it mentions Google.
+- **The uncaught-exception handler** in `JavaLoggingApplication.main`. The JVM prints the last exception of a thread to stderr on every platform.
+- **`SpanQueryRedactionFilter`.** The agent records `url.query` on the server span whichever backend the trace goes to. `app.tracing.redact-url-query: false` switches it off.
 
 ## Changes for AKS or EKS
 
@@ -74,7 +76,7 @@ Differences from the GKE class:
    | CloudWatch Logs (EKS) | 256 KB per event for years, raised to 1 MB in 2025 | 131072 / 40 |
    | Grafana Loki | `max_line_size` default 256 KB | 131072 / 40 |
 
-   Size `app.logging.message-max-length` with the same budget in mind; on AKS without the multiline feature, 2048 keeps message plus trace under 16 KB.
+   Size `app.logging.message-max-length` with the same budget in mind; on AKS without the multiline feature, 2048 keeps message plus trace under 16 KB. The caps count characters: for Korean, Japanese or Chinese text divide them by three, because nothing here bounds the line in bytes.
 
 4. **Swap the telemetry wiring, not the image.** The image already carries `-javaagent` on its `ENTRYPOINT` command line. On EKS or AKS, give the Deployment plain `OTEL_*` variables pointing at the ADOT Collector or your Collector, or use the OpenTelemetry Operator's `Instrumentation` CR with the SDK-only annotation `instrumentation.opentelemetry.io/inject-sdk: "true"`. Do not use `inject-java: "true"` with this image: the Operator mounts its own agent and adds a second `-javaagent` through `JAVA_TOOL_OPTIONS`, and two agents in one JVM mean duplicate telemetry or classloader failures. `OTEL_LOGS_EXPORTER=none` in the image keeps the upstream agent from exporting logs over OTLP. If you choose the Azure Monitor OpenTelemetry distro for Java (`applicationinsights-agent.jar`) instead, it ignores `OTEL_LOGS_EXPORTER` and ships logs to Application Insights by itself unless you set `APPLICATIONINSIGHTS_INSTRUMENTATION_LOGGING_LEVEL=OFF` (or `instrumentation.logging.level: OFF` in `applicationinsights.json`). Run one log path.
 5. **One image, one env var.** [`k8s/java-logging.yaml`](k8s/java-logging.yaml) pins `LOGGING_STRUCTURED_FORMAT_CONSOLE=com.example.logging.GoogleCloudStructuredLogFormatter` in the GKE Deployment, and environment variables override `application.yaml`. When a single image serves multiple clouds, set `logstash` or `com.example.logging.OpenTelemetryStructuredLogFormatter` as the default in [`application.yaml`](src/main/resources/application.yaml) (or omit `console` to keep plain-text logs on laptops) while the GKE Deployment override keeps Cloud Logging JSON active in the cluster.
@@ -111,16 +113,21 @@ public final class OpenTelemetryStructuredLogFormatter extends AbstractJsonLineF
                         "level",
                         event -> event.getLevel().toString(),
                         messageRenderer(environment, stackTracePrinter, throwableProxyConverter)),
+                OpenTelemetryStructuredLogFormatter::traceMembers,   // also on the reduced line
                 openTelemetryMembers(contextPairs),           // below
                 customizer);
+    }
+
+    private static void traceMembers(JsonWriter.Members<ILoggingEvent> members) {
+        members.add(TRACE_ID, event -> mdcValue(event, TRACE_ID)).whenHasLength();
+        members.add(SPAN_ID, event -> mdcValue(event, SPAN_ID)).whenHasLength();
+        members.add(TRACE_FLAGS, event -> mdcValue(event, TRACE_FLAGS)).whenHasLength();
     }
 
     private static Consumer<JsonWriter.Members<ILoggingEvent>> openTelemetryMembers(
             ContextPairs contextPairs) {
         return members -> {
-            members.add(TRACE_ID, event -> mdcValue(event, TRACE_ID)).whenHasLength();
-            members.add(SPAN_ID, event -> mdcValue(event, SPAN_ID)).whenHasLength();
-            members.add(TRACE_FLAGS, event -> mdcValue(event, TRACE_FLAGS)).whenHasLength();
+            traceMembers(members);
             members.add(TAGS, AbstractJsonLineFormatter::tags).whenNotEmpty();
             members.add().usingPairs(contextPairs.flat("_", pairs ->
                     pairs.addMapEntries(event -> userFields(event, key -> isUserKey(key, RESERVED)))));
@@ -129,4 +136,4 @@ public final class OpenTelemetryStructuredLogFormatter extends AbstractJsonLineF
 }
 ```
 
-`AbstractJsonLineFormatter` supplies `coreMembers`, the message with its stack trace and cap, `userFields` (MDC first, then key-value pairs, one map), `tags`, the string form of non-finite numbers, and the fallback line.
+`AbstractJsonLineFormatter` supplies `coreMembers`, the message with its stack trace and cap, `userFields` (MDC first, then key-value pairs, one map), `tags`, the string form of non-finite numbers, and the reduced line (core members, trace members, `log_format_error`).

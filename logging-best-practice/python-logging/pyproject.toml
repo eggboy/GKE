@@ -6,14 +6,14 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",
     # Tracing is zero-code: `opentelemetry-instrument` (from opentelemetry-distro) configures the SDK from the OTEL_*
-    # variables injected by the GKE Instrumentation CR and activates the instrumentations below at process start.
+    # variables injected by the GKE Instrumentation CR and activates the FastAPI instrumentation at process start.
+    # opentelemetry-instrumentation-logging is left out on purpose: it puts an OTLP log handler on the root logger
+    # by default and stamps the trace on a LogRecord only with OTEL_PYTHON_LOG_CORRELATION=true, which also calls
+    # logging.basicConfig(). configure_logging() stamps the trace itself (install_trace_record_factory).
     "opentelemetry-api>=1.45.1,<2",
     "opentelemetry-distro>=0.54b0,<1",
     "opentelemetry-exporter-otlp>=1.39,<2",
     "opentelemetry-instrumentation-fastapi>=0.54b0,<1",
-    # Stamps otelTraceID/otelSpanID/otelTraceSampled on every LogRecord when it is created, which keeps trace
-    # correlation correct behind a QueueHandler. The formatter reads them and drops them from the payload.
-    "opentelemetry-instrumentation-logging>=0.54b0,<1",
     "pydantic>=2.9.0,<3",
     "uvicorn>=0.34,<1",
 ]
@@ -41,7 +41,7 @@ default = true
 known_first_party = ["python_logging"]
 # uvicorn is the server process started by the Dockerfile CMD; the OpenTelemetry packages are activated by
 # opentelemetry-instrument, not imported.
-per_rule_ignores = { DEP002 = ["uvicorn", "opentelemetry-distro", "opentelemetry-exporter-otlp", "opentelemetry-instrumentation-fastapi", "opentelemetry-instrumentation-logging"] }
+per_rule_ignores = { DEP002 = ["uvicorn", "opentelemetry-distro", "opentelemetry-exporter-otlp", "opentelemetry-instrumentation-fastapi"] }
 
 [tool.ruff]
 line-length = 120

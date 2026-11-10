@@ -27,14 +27,20 @@ logging:
         # root: last and include-hashes: false stay at their defaults: Error Reporting needs plain JVM format.
       # `add` and `rename` work, but a name they introduce must not match an MDC key or an addKeyValue key.
       # Spring Boot refuses to write a name twice; the formatter then writes only timestamp, severity, message,
-      # logger and thread plus `log_format_error` for that event.
+      # logger, thread and the trace fields plus `log_format_error` for that event.
 
 # Read by both formatters in this sample (not Spring Boot properties).
 app:
   logging:
     # Characters of the log message kept before "... [N more characters]"; the stack trace is bounded above.
-    # 65536 + 131072 leaves room under the 256 KiB entry limit. 0 disables the cap.
+    # 65536 + 131072 characters are 197 KB of ASCII, under the 256 KiB entry limit. They are not bytes: a line of
+    # Korean text that long, or a large key-value pair, goes over the limit and is lost. 0 disables the cap.
     message-max-length: 65536
     # GoogleCloudStructuredLogFormatter only. false drops logging.googleapis.com/sourceLocation and the stack
     # walk per event that producing it costs.
     source-location: true
+  tracing:
+    # SpanQueryRedactionFilter. true (the default) rewrites url.query on the server span so that every parameter
+    # keeps its name and loses its value: cartId=REDACTED&access_token=REDACTED. false leaves the query string in
+    # Cloud Trace as the client sent it. As an environment variable: APP_TRACING_REDACT_URL_QUERY.
+    redact-url-query: true

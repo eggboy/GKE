@@ -16,6 +16,7 @@ from opentelemetry import trace
 from pydantic import BaseModel
 
 from python_logging.structured_logging import configure_logging
+from python_logging.tracing import SpanQueryRedactionMiddleware
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ def _has_handler(exc: Exception) -> bool:
 
 
 app = FastAPI(title="python-logging", dependencies=[Depends(log_unhandled_exceptions)])
+# The access-log filter keeps query strings out of the log; this keeps their values out of the trace.
+app.add_middleware(SpanQueryRedactionMiddleware)
 
 
 @app.exception_handler(UnknownCartError)

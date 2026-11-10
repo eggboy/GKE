@@ -13,8 +13,8 @@ spec:
     configInjection:
       enabled: true
   otelSDKConfig:
-    # Application logs reach Cloud Logging through stdout JSON only. The Python OTLP log handler is opt-in anyway
-    # (OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED); this keeps it off even if someone sets that variable.
+    # Application logs reach Cloud Logging through stdout JSON only. The image installs no logging instrumentation
+    # and sets OTEL_LOGS_EXPORTER=none; this keeps OTLP log export off even if someone adds one.
     logger_provider: null
 ---
 apiVersion: apps/v1

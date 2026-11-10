@@ -69,16 +69,25 @@ public final class OpenTelemetryStructuredLogFormatter extends AbstractJsonLineF
                         "level",
                         event -> event.getLevel().toString(),
                         messageRenderer(environment, stackTracePrinter, throwableProxyConverter)),
+                OpenTelemetryStructuredLogFormatter::traceMembers,
                 openTelemetryMembers(contextPairs),
                 customizer);
+    }
+
+    /**
+     * {@code trace_id}, {@code span_id} and {@code trace_flags}. They are on the reduced line as
+     * well, so that a line which lost its fields is still found from its request.
+     */
+    private static void traceMembers(JsonWriter.Members<ILoggingEvent> members) {
+        members.add(TRACE_ID, event -> mdcValue(event, TRACE_ID)).whenHasLength();
+        members.add(SPAN_ID, event -> mdcValue(event, SPAN_ID)).whenHasLength();
+        members.add(TRACE_FLAGS, event -> mdcValue(event, TRACE_FLAGS)).whenHasLength();
     }
 
     private static Consumer<JsonWriter.Members<ILoggingEvent>> openTelemetryMembers(
             ContextPairs contextPairs) {
         return members -> {
-            members.add(TRACE_ID, event -> mdcValue(event, TRACE_ID)).whenHasLength();
-            members.add(SPAN_ID, event -> mdcValue(event, SPAN_ID)).whenHasLength();
-            members.add(TRACE_FLAGS, event -> mdcValue(event, TRACE_FLAGS)).whenHasLength();
+            traceMembers(members);
             members.add(TAGS, AbstractJsonLineFormatter::tags).whenNotEmpty();
             members.add()
                     .usingPairs(
