@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p1-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: p1-otel-app-ksa
+  namespace: p1-demo
+  annotations:
+    iam.gke.io/gcp-service-account: "p1-otel-trace-gsa@PROJECT_ID.iam.gserviceaccount.com"
+---
+apiVersion: telemetry.googleapis.com/v1alpha1
+kind: Instrumentation
+metadata:
+  name: checkout-api-instrumentation
+  namespace: p1-demo
+spec:
+  selector:
+    matchLabels:
+      app: checkout-api
+  autoInstrumentationConfig:
+    configInjection:
+      enabled: true
+---
+apiVersion: telemetry.googleapis.com/v1alpha1
+kind: Instrumentation
+metadata:
+  name: storefront-agent-instrumentation
+  namespace: p1-demo
+spec:
+  selector:
+    matchLabels:
+      app: storefront-agent
+  autoInstrumentationConfig:
+    configInjection:
+      enabled: true

@@ -1,0 +1,97 @@
+[project]
+name = "python-logging"
+version = "0.1.0"
+description = "Cloud Logging structured JSON on stdout for a FastAPI service on GKE, correlated with the active OpenTelemetry span"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    # Tracing is zero-code: `opentelemetry-instrument` (from opentelemetry-distro) configures the SDK from the OTEL_*
+    # variables injected by the GKE Instrumentation CR and activates the instrumentations below at process start.
+    "opentelemetry-api>=1.45.1,<2",
+    "opentelemetry-distro>=0.54b0,<1",
+    "opentelemetry-exporter-otlp>=1.39,<2",
+    "opentelemetry-instrumentation-fastapi>=0.54b0,<1",
+    # Stamps otelTraceID/otelSpanID/otelTraceSampled on every LogRecord when it is created, which keeps trace
+    # correlation correct behind a QueueHandler. The formatter reads them and drops them from the payload.
+    "opentelemetry-instrumentation-logging>=0.54b0,<1",
+    "pydantic>=2.9.0,<3",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "deptry>=0.23,<1",
+    "httpx>=0.27,<1",
+    "opentelemetry-sdk>=1.39,<2",
+    "pytest>=8,<10",
+    "ruff>=0.8,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# The lock file must record public URLs: the image is built on Cloud Build, which cannot reach a corporate package
+# proxy configured in a developer's user- or system-level uv.toml.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.deptry]
+known_first_party = ["python_logging"]
+# uvicorn is the server process started by the Dockerfile CMD; the OpenTelemetry packages are activated by
+# opentelemetry-instrument, not imported.
+per_rule_ignores = { DEP002 = ["uvicorn", "opentelemetry-distro", "opentelemetry-exporter-otlp", "opentelemetry-instrumentation-fastapi", "opentelemetry-instrumentation-logging"] }
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "A",        # shadowed builtins
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "ASYNC",    # blocking calls in async code
+    "S",        # bandit
+    "BLE",      # blind except
+    "D",        # pydocstyle (google convention below)
+    "RUF",      # ruff-specific
+    "PT",       # pytest style
+    "LOG", "G", # logging practices and lazy formatting
+    "ANN",      # type annotations on public APIs
+    "ARG",      # unused arguments
+    "PTH",      # pathlib over os.path
+    "PL",       # pylint
+    "T20",      # stray print()
+    "TRY",      # exception handling
+]
+ignore = [
+    "ANN401",   # Any is legitimate in JSON payloads
+    "TRY003",   # messages in exception constructors are fine for one-off errors
+    "PLR2004",  # magic numbers in HTTP status / bound checks read better inline
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["python_logging", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: asserts, fixtures without docstrings, positional parametrize arguments, deliberate raises inside try.
+"tests/*" = ["S101", "D", "ANN", "PLR0913", "PLR0917", "TRY301", "SLF001"]
+"tests/conftest.py" = ["E402"]  # the project must be set before the app module is imported
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/python_logging"]

@@ -1,0 +1,42 @@
+[project]
+name = "checkout-api"
+version = "0.1.0"
+description = "REST checkout microservice behind GKE Regional Internal ALB using GKE Managed OpenTelemetry"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    # Tracing is zero-code: `opentelemetry-instrument` (from opentelemetry-distro) configures the SDK from the OTEL_*
+    # variables injected by the GKE Instrumentation CR and activates the FastAPI instrumentation at process start.
+    # The otlp meta-package ships both http/protobuf and grpc exporters, so whichever OTEL_EXPORTER_OTLP_PROTOCOL the
+    # CR injects is honoured.
+    "opentelemetry-api>=1.45.1,<2",  # >=1.45.1: CVE-2026-114603 (O(N^2) tracestate parsing)
+    "opentelemetry-distro>=0.54b0,<1",
+    "opentelemetry-exporter-otlp>=1.39,<2",
+    "opentelemetry-instrumentation-fastapi>=0.54b0,<1",
+    "pydantic>=2.9.0,<3",
+    "python-dotenv>=1.0.1,<2",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "deptry>=0.23,<1",
+    "httpx>=0.27,<1",
+    "opentelemetry-sdk>=1.39,<2",
+    "pytest>=8,<10",
+]
+
+[tool.fastapi]
+entrypoint = "checkout_api.main:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.deptry]
+known_first_party = ["checkout_api"]
+# uvicorn is the server process started by the Dockerfile CMD, not an import.
+per_rule_ignores = { DEP002 = ["uvicorn"] }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

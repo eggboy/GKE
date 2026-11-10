@@ -1,0 +1,10 @@
+name: "projects/PROJECT_ID/locations/REGION/telemetryPolicies/p1-checkout-tracing-policy"
+displayName: "GKE LB tracing demo: internal checkout ALB"
+telemetryTarget:
+  resources:
+    - "//compute.googleapis.com/projects/PROJECT_ID/regions/REGION/forwardingRules/RILB_FR_NAME"
+tracingConfiguration:
+  samplingRate: 0.01
+  parentBasedSampling:
+    enabled: true
+    samplingRate: 1.0

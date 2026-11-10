@@ -1,0 +1,7 @@
+name: "projects/PROJECT_ID/locations/global/telemetryPolicies/p1-storefront-tracing-policy"
+displayName: "GKE LB tracing demo: external storefront ALB"
+telemetryTarget:
+  resources:
+    - "//compute.googleapis.com/projects/PROJECT_ID/global/forwardingRules/EXT_FR_NAME"
+tracingConfiguration:
+  samplingRate: 1.0

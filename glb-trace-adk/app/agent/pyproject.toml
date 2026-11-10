@@ -1,0 +1,49 @@
+[project]
+name = "storefront-agent"
+version = "0.1.0"
+description = "ADK FastAPI storefront agent using GKE Managed OpenTelemetry and Gateway API LB tracing"
+requires-python = ">=3.12"
+dependencies = [
+    # Everything imported directly is declared directly, even when google-adk[otel] would pull it in anyway.
+    "fastapi>=0.115,<1",
+    "google-adk[otel]>=2.13.0,<3",
+    "google-genai>=1.0,<3",
+    "httpx>=0.27,<1",
+    "opentelemetry-api>=1.45.1,<2",  # >=1.45.1: CVE-2026-114603 (O(N^2) tracestate parsing)
+    "opentelemetry-instrumentation>=0.54b0,<1",  # TraceResponsePropagator (W3C traceresponse header)
+    "opentelemetry-instrumentation-fastapi>=0.54b0,<1",
+    "opentelemetry-instrumentation-httpx>=0.54b0,<1",
+    "pydantic>=2.9.0,<3",
+    "python-dotenv>=1.0.1,<2",
+    "uvicorn>=0.34.0,<1",
+]
+
+[tool.uv]
+# google-adk caps opentelemetry-api/-sdk at the newest release it was tested with (<=1.44 for 2.13.0; the cap moved
+# with every ADK release: 2.12 had <=1.42.1). 1.45.1 fixes CVE-2026-114603 and keeps every SDK symbol ADK imports;
+# the test suite and the OTLP smoke run exercise ADK's provider setup on it. Remove once google-adk allows >=1.45.1.
+override-dependencies = [
+    "opentelemetry-api>=1.45.1,<2",
+    "opentelemetry-sdk>=1.45.1,<2",
+]
+# The OTLP exporter must move with the SDK (same 1.x.y release train): an exporter left on 1.44 fails to import
+# against SDK 1.45 and ADK then silently disables OTLP export of traces, metrics and logs.
+constraint-dependencies = [
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "deptry>=0.23,<1",
+    "opentelemetry-sdk>=1.39,<2",
+    "pytest>=8,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "agents"]
+
+[tool.deptry]
+known_first_party = ["agents", "storefront_agent", "structured_logging"]
+# uvicorn is the server process started by the Dockerfile CMD, not an import.
+per_rule_ignores = { DEP002 = ["uvicorn"] }

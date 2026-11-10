@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: java-logging
+  main:
+    # The banner is multi-line plain text on stdout: one Cloud Logging entry per line.
+    banner-mode: "off"
+
+server:
+  port: 8080
+
+logging:
+  structured:
+    format:
+      # Every console line is one JSON document. GoogleCloudStructuredLogFormatter targets GKE and fails at boot
+      # when GOOGLE_CLOUD_PROJECT is unset. Outside GKE, set built-in `logstash` (`ecs` for Elastic/OpenSearch)
+      # or `com.example.logging.OpenTelemetryStructuredLogFormatter`, or override per cluster via
+      # LOGGING_STRUCTURED_FORMAT_CONSOLE.
+      console: com.example.logging.GoogleCloudStructuredLogFormatter
+    json:
+      stacktrace:
+        # Cloud Logging drops (not truncates) a jsonPayload entry above 256 KiB, so Java traces need a bound.
+        # Depth per throwable does the real work and keeps every "Caused by:" block; max-length is a tail
+        # chop (it would cut the root cause first), so it stays high as the guard against huge messages.
+        max-throwable-depth: 40
+        include-common-frames: false
+        max-length: 131072
+        # root: last and include-hashes: false stay at their defaults: Error Reporting needs plain JVM format.
+      # `add` and `rename` work, but a name they introduce must not match an MDC key or an addKeyValue key.
+      # Spring Boot refuses to write a name twice; the formatter then writes only timestamp, severity, message,
+      # logger and thread plus `log_format_error` for that event.
+
+# Read by both formatters in this sample (not Spring Boot properties).
+app:
+  logging:
+    # Characters of the log message kept before "... [N more characters]"; the stack trace is bounded above.
+    # 65536 + 131072 leaves room under the 256 KiB entry limit. 0 disables the cap.
+    message-max-length: 65536
+    # GoogleCloudStructuredLogFormatter only. false drops logging.googleapis.com/sourceLocation and the stack
+    # walk per event that producing it costs.
+    source-location: true

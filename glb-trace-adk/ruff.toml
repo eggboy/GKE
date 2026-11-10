@@ -1,0 +1,50 @@
+# One Ruff configuration for both services and the scripts (ruff resolves the closest config up the tree).
+line-length = 120
+target-version = "py312"
+extend-exclude = [".chrome-profile", ".venv"]
+
+[lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "A",        # shadowed builtins
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "ASYNC",    # blocking calls in async code
+    "S",        # bandit
+    "BLE",      # blind except
+    "D",        # pydocstyle (google convention below)
+    "RUF",      # ruff-specific
+    "PT",       # pytest style
+    "LOG", "G", # logging practices and lazy formatting
+    "ANN",      # type annotations on public APIs
+    "ARG",      # unused arguments
+    "PTH",      # pathlib over os.path
+    "PL",       # pylint
+    "T20",      # stray print()
+    "TRY",      # exception handling
+]
+ignore = [
+    "ANN401",   # Any is legitimate in tool signatures and JSON payloads
+    "TRY003",   # messages in exception constructors are fine for one-off errors
+    "PLR2004",  # magic numbers in HTTP status / bound checks read better inline
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.isort]
+known-first-party = ["checkout_api", "main", "storefront_agent", "structured_logging", "tests"]
+
+[lint.per-file-ignores]
+# load_dotenv() must run before the agent package is imported (it reads env at import time); E402 is the price.
+"app/agent/main.py" = ["E402"]
+# Scripts are CLIs: they print, and they shell out to gcloud/kubectl with fixed argv.
+"scripts/*" = ["T201", "S603", "S607"]
+# Tests: asserts, fixtures without docstrings, positional parametrize arguments, deliberate raises inside try.
+"**/tests/*" = ["S101", "D", "ANN", "PLR0913", "PLR0917", "TRY301", "SLF001"]
+"**/conftest.py" = ["E402"]  # os.environ must be set before the app module is imported

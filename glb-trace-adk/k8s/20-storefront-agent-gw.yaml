@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront-agent
+  namespace: p1-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storefront-agent
+  template:
+    metadata:
+      labels:
+        app: storefront-agent
+    spec:
+      serviceAccountName: p1-otel-app-ksa
+      containers:
+        - name: app
+          image: REGION-docker.pkg.dev/PROJECT_ID/p1-lb-trace-repo/storefront-agent:IMAGE_TAG
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "TRUE"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "PROJECT_ID"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "global"
+            - name: OTEL_SERVICE_NAME
+              value: "storefront-agent"
+            - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+              value: "NO_CONTENT"
+            - name: OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT
+              value: "true"
+            - name: CHECKOUT_API_URL
+              value: "http://RILB_VIP"
+            - name: GEMINI_MODEL
+              value: "gemini-3.8-flash"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront-agent
+  namespace: p1-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: storefront-agent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: p1-storefront-hc-policy
+  namespace: p1-demo
+spec:
+  default:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    config:
+      type: HTTP
+      httpHealthCheck:
+        portSpecification: USE_SERVING_PORT
+        requestPath: /healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: storefront-agent
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: p1-storefront-backend-policy
+  namespace: p1-demo
+spec:
+  default:
+    timeoutSec: 60
+    securityPolicy: p1-storefront-waf
+    logging:
+      enabled: true
+      sampleRate: 1000000
+  targetRef:
+    group: ""
+    kind: Service
+    name: storefront-agent
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: p1-storefront-ext-gw
+  namespace: p1-demo
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: p1-storefront-route
+  namespace: p1-demo
+spec:
+  parentRefs:
+    - name: p1-storefront-ext-gw
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /
+        - path:
+            type: PathPrefix
+            value: /dev-ui
+        - path:
+            type: PathPrefix
+            value: /list-apps
+        - path:
+            type: PathPrefix
+            value: /apps
+        - path:
+            type: PathPrefix
+            value: /run
+        - path:
+            type: PathPrefix
+            value: /run_sse
+        - path:
+            type: PathPrefix
+            value: /debug
+        - path:
+            type: PathPrefix
+            value: /version
+        - path:
+            type: PathPrefix
+            value: /order
+      backendRefs:
+        - name: storefront-agent
+          port: 80
